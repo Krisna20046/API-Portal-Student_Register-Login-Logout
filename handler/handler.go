@@ -53,6 +53,13 @@ func AuthAdmin(next http.Handler) http.Handler {
 			return
 		}
 
+		roleCookie, err := r.Cookie("user_login_role")
+		if err != nil || roleCookie.Value != "admin" {
+			w.WriteHeader(http.StatusUnauthorized)
+			json.NewEncoder(w).Encode(model.ErrorResponse{Error: "user login role not Admin"})
+			return
+		}
+
 		ctx := r.Context()
 		ctx = context.WithValue(ctx, "userID", c.Value)
 
@@ -61,66 +68,60 @@ func AuthAdmin(next http.Handler) http.Handler {
 }
 
 func Login(w http.ResponseWriter, r *http.Request) {
-	// TODO: answer here
-	if r.Method != http.MethodPost {
-		w.WriteHeader(http.StatusMethodNotAllowed)
-		json.NewEncoder(w).Encode(model.ErrorResponse{Error: "Method is not allowed!"})
-		return
-	}
-	// Membaca body request dan memasukkannya ke variabel user
-	var user model.UserLogin
-	err := json.NewDecoder(r.Body).Decode(&user)
-	if err != nil {
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(model.ErrorResponse{Error: "Body request tidak valid"})
-	}
-	// Memeriksa apakah ID kosong
-	if user.ID == "" || user.Name == "" {
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(model.ErrorResponse{Error: "ID or name is empty"})
-	}
-	userData, err := os.ReadFile("data/users.txt")
-	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(model.ErrorResponse{Error: "Internal server error"})
-	}
-	var usersExist bool
-	for _, line := range strings.Split(string(userData), "\n") {
-		if strings.HasPrefix(line, user.ID+"_") {
-			usersExist = true
-			break
-		}
-	}
-	if !usersExist {
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(model.ErrorResponse{Error: "user not found"})
-	}
+    if r.Method != http.MethodPost {
+        w.WriteHeader(http.StatusMethodNotAllowed)
+        json.NewEncoder(w).Encode(model.ErrorResponse{Error: "Method is not allowed!"})
+        return
+    }
 
-	var userCookie model.User
-	// Set cookie user_login_id
-	idCookie := http.Cookie{
-		Name:  "user_login_id",
-		Value: userCookie.ID,
-	}
-	http.SetCookie(w, &idCookie)
+    var user model.User
+    err := json.NewDecoder(r.Body).Decode(&user)
+    if err != nil {
+        w.WriteHeader(http.StatusBadRequest)
+        json.NewEncoder(w).Encode(model.ErrorResponse{Error: "Invalid request body"})
+        return
+    }
 
-	// Set cookie user_login_role
-	roleCookie := http.Cookie{
-		Name:  "user_login_role",
-		Value: userCookie.Role,
-	}
-	http.SetCookie(w, &roleCookie)
+    if user.ID == "" || user.Name == "" {
+        w.WriteHeader(http.StatusBadRequest)
+        json.NewEncoder(w).Encode(model.ErrorResponse{Error: "ID or name is empty"})
+        return
+    }
 
-	// Simpan data user yang login ke dalam map UserLogin
-	users := make(map[string]model.UserLogin)
-	users[user.ID] = user
+    userData, err := os.ReadFile("data/users.txt")
+    if err != nil {
+        w.WriteHeader(http.StatusInternalServerError)
+        json.NewEncoder(w).Encode(model.ErrorResponse{Error: "Internal server error"})
+        return
+    }
 
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(model.SuccessResponse{
-		Username: user.ID,
-		Message:  "login success"})
+    var userExists bool
+	var role string
+    for _, line := range strings.Split(string(userData), "\n") {
+        if strings.HasPrefix(line, user.ID+"_") {
+            userExists = true
+			fields := strings.Split(line, "_")
+            role = fields[3]
+            break
+        }
+    }
 
+    if !userExists {
+        w.WriteHeader(http.StatusBadRequest)
+        json.NewEncoder(w).Encode(model.ErrorResponse{Error: "user not found"})
+        return
+    }
+
+    http.SetCookie(w, &http.Cookie{Name: "user_login_id", Value: user.ID})
+    http.SetCookie(w, &http.Cookie{Name: "user_login_role", Value: role})
+
+    UserLogin[user.ID] = user
+
+    json.NewEncoder(w).Encode(model.SuccessResponse{
+		Username: user.Name,
+		Message: "login success"})
 }
+
 
 func Register(w http.ResponseWriter, r *http.Request) {
 	// TODO: answer here
@@ -293,23 +294,9 @@ func AddUser(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(model.ErrorResponse{Error: "Method is not allowed!"})
 		return
 	}
-	// Check if user is logged in
-	_, err := r.Cookie("user_login_id")
-	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(model.ErrorResponse{Error: "user login id not found"})
-		return
-	}
-	// Check if user has admin role
-	roleCookie, err := r.Cookie("user_login_role")
-	if err != nil || roleCookie.Value != "admin" {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(model.ErrorResponse{Error: "user login role not Admin"})
-		return
-	}
 	// Membaca body request dan memasukkannya ke variabel user
 	var user model.User
-	err = json.NewDecoder(r.Body).Decode(&user)
+	err := json.NewDecoder(r.Body).Decode(&user)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(model.ErrorResponse{Error: "Body request tidak valid"})
@@ -464,34 +451,40 @@ var GetWetherByRegionAPI = client.GetWeatherByRegion
 func GetWeather(w http.ResponseWriter, r *http.Request) {
 	var listRegion = []string{"jakarta", "bandung", "surabaya", "yogyakarta", "medan", "makassar", "manado", "palembang", "semarang", "bali"}
 
-	// DESC: dapatkan data weather dari 10 data di atas menggunakan goroutine
-	// TODO: answer here
+	var resCh = make(chan model.MainWeather, len(listRegion))
+	var errCh = make(chan error, len(listRegion))
 
-	resultCh := make(chan model.MainWeather)
-	errCh := make(chan error)
-
-	// menjalankan goroutine untuk setiap wilayah
 	for _, region := range listRegion {
-		go func(region string) {
+		go func(resCh chan model.MainWeather, region string) {
 			weather, err := GetWetherByRegionAPI(region)
 			if err != nil {
 				errCh <- err
-				return
+			} else {
+				resCh <- weather
 			}
-			resultCh <- weather
-		}(region)
+
+		}(resCh, region)
 	}
 
-	// mengumpulkan hasil cuaca dari setiap goroutine
 	var weathers []model.MainWeather
+
 	for i := 0; i < len(listRegion); i++ {
 		select {
-		case weather := <-resultCh:
+		case weather := <-resCh:
 			weathers = append(weathers, weather)
 		case err := <-errCh:
+			errorMessage := model.ErrorResponse{Error: err.Error()}
+			errorMessageJson, _ := json.Marshal(errorMessage)
+			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(model.ErrorResponse{Error: err.Error()})
+			w.Write(errorMessageJson)
 			return
 		}
 	}
+
+	weatherJSON, _ := json.Marshal(weathers)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	w.Write(weatherJSON)
+
 }
